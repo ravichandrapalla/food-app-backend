@@ -3,10 +3,34 @@ import { PrismaClient } from "../generated/prisma/index.js";
 import { sendOtpEmail } from "../utils/sendOtpEmail.js";
 import otpGenerator from "otp-generator";
 import bcrypt, { hash } from "bcrypt";
-const saltRounds = 10;
 
 const prisma = new PrismaClient();
 const router = Router();
+
+const initiateOtpProcess = async (email, id) => {
+  const saltRounds = 10;
+  const otp = otpGenerator.generate(4, {
+    upperCaseAlphabets: false,
+    specialChars: false,
+  });
+  await sendOtpEmail(email, otp);
+  bcrypt.hash(otp, saltRounds, async function (err, hash) {
+    // Store hash in your password DB.
+    if (hash) {
+      await prisma.otpVerification.create({
+        data: {
+          otp: hash,
+          expiresAt: new Date(Date.now() + 10 * 60 * 1000),
+          user: {
+            connect: { id },
+          },
+        },
+      });
+    } else if (err) {
+      console.log(err);
+    }
+  });
+};
 
 router.get("/", (req, res) => {
   return res.status(200).json({ message: "perfect connected to backend" });
@@ -33,31 +57,13 @@ router.post("/sign-up", async (req, res) => {
       .status(409)
       .json({ message: "user already exists please continue logging in" });
   }
-  const otp = otpGenerator.generate(4, {
-    upperCaseAlphabets: false,
-    specialChars: false,
-  });
-  const hash = await bcrypt.hash(otp, saltRounds);
 
-  bcrypt.hash(hash, saltRounds, async function (err, hash) {
-    // Store hash in your password DB.
-    if (hash) {
-      await prisma.otpVerification.create({
-        data: {
-          otp: hash,
-          expiresAt: new Date(Date.now() + 10 * 60 * 1000),
-          user: {
-            connect: { id: existingUser.id },
-          },
-        },
-      });
-    } else if (err) {
-      console.log(err);
-    }
-  });
+  // const hash = await bcrypt.hash(otp, saltRounds);
 
   if (existingUser) {
-    await sendOtpEmail(email, otp);
+    const userRecord = await prisma.user.findUnique({ where: { email } });
+    initiateOtpProcess(email, userRecord.id);
+
     return res
       .status(403)
       .json({ message: "user already exists but not verified" });
@@ -66,9 +72,10 @@ router.post("/sign-up", async (req, res) => {
   try {
     const user = await prisma.user.create({
       data: { name, email, password },
+      select: { id: true, email: true },
     });
+    initiateOtpProcess(user.email, user.id);
 
-    await sendOtpEmail(email, otp);
     return res.status(201).json({
       message: "Request is successful and user created on server",
       data: user,
@@ -107,14 +114,14 @@ router.post("/verify-otp", async (req, res) => {
   if (isMatch) {
     await prisma.otpVerification.update({
       where: {
-        id: userId,
+        id: userRecord.id,
       },
       data: {
         verified: true,
       },
     });
     await prisma.user.update({
-      where: { id: user.id },
+      where: { id: userRecord.id },
       data: { isVerified: true },
     });
     res.status(200).json({ message: "User verified successfully" });
